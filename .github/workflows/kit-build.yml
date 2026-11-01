@@ -119,11 +119,19 @@ jobs:
           sudo apt-get -o Acquire::Retries=3 update
           sudo apt-get -o Acquire::Retries=3 install --no-install-recommends -y skopeo
           corepack pnpm install --frozen-lockfile --ignore-scripts
-      - name: Allow unprivileged user namespaces (Codex sandbox probe in the runtime smoke)
+      - name: Allow the Codex sandbox on the runner (user namespaces, Docker AppArmor profile)
         if: ${{ matrix.image == 'runtime' }}
         # GitHub's ubuntu-24.04 runners restrict them through AppArmor; bubblewrap then fails with
         # "loopback: Failed RTM_NEWADDR: Operation not permitted". Upstream's own runners allow them.
-        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+        run: |
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          # Docker applies its docker-default AppArmor profile, which denies the mount-propagation change bubblewrap
+          # makes ("bwrap: Failed to make / slave: Permission denied"). Docker loads its own version only when no
+          # profile of that name is loaded, so load a permissive one first. Throwaway runner only.
+          printf '%s\n' 'abi <abi/3.0>,' 'profile docker-default flags=(attach_disconnected,mediate_deleted) {' \
+            '  file, network, capability, mount, umount, remount, pivot_root, ptrace, signal, unix, dbus, userns,' '}' \
+            | sudo apparmor_parser -r -W
+          sudo aa-status | grep -A0 docker-default
       - name: Smoke the exact export (upstream's test)
         env:
           IMAGE: ${{ matrix.image }}
