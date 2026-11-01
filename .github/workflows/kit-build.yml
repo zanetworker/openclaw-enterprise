@@ -1,0 +1,148 @@
+name: Kit image build
+
+# Mirrors upstream container-check.yml (prepare job) for one source commit, linux/amd64, then publishes to GHCR.
+on:
+  push:
+    branches: [kit-build]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: kit-build
+  cancel-in-progress: false
+
+jobs:
+  resolve:
+    runs-on: ubuntu-24.04
+    outputs:
+      repo: ${{ steps.r.outputs.repo }}
+      sha: ${{ steps.r.outputs.sha }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - id: r
+        run: |
+          repo="$(jq -r .repo kit-build.json)"; ref="$(jq -r .ref kit-build.json)"
+          [[ "$repo" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]
+          sha="$(git ls-remote "https://github.com/$repo.git" "$ref" "refs/heads/$ref" | head -1 | cut -f1)"
+          [[ "$ref" =~ ^[0-9a-f]{40}$ ]] && sha="$ref"
+          [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || { echo "cannot resolve $ref in $repo"; exit 1; }
+          echo "repo=$repo" >> "$GITHUB_OUTPUT"; echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "Building $repo at $sha ($ref)" >> "$GITHUB_STEP_SUMMARY"
+
+  build:
+    needs: resolve
+    name: Build ${{ matrix.image }} (amd64)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        image: [controller, runtime]
+        include:
+          - image: controller
+            file: Dockerfile
+            target: runtime
+          - image: runtime
+            file: deploy/runtime/Dockerfile
+            target: ""
+    env:
+      SOURCE_SHA: ${{ needs.resolve.outputs.sha }}
+      SOURCE_REPO: ${{ needs.resolve.outputs.repo }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: ${{ needs.resolve.outputs.repo }}
+          ref: ${{ needs.resolve.outputs.sha }}
+          persist-credentials: false
+      - name: Pin image timestamps to the source commit
+        run: |
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          printf 'SOURCE_DATE_EPOCH=%s\n' "$(git show --no-patch --format=%ct "$SOURCE_SHA")" >> "$GITHUB_ENV"
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
+        with:
+          node-version: "24.22.1"
+      - name: Select the checked-in Node base
+        run: |
+          NODE_BASE_IMAGE="$(node -p 'require("./scripts/ci/test-suites/images-packaging.json").prepare.defaultEnv.NODE_BASE_IMAGE')"
+          [[ "$NODE_BASE_IMAGE" =~ ^[^[:space:]]+@sha256:[a-fA-F0-9]{64}$ ]]
+          printf 'NODE_BASE_IMAGE=%s\n' "$NODE_BASE_IMAGE" >> "$GITHUB_ENV"
+      - name: Read the OpenClaw source pin
+        if: ${{ matrix.image == 'runtime' }}
+        id: openclaw-source
+        run: |
+          values="$(node scripts/lib/openclaw-source.mjs build-args)"
+          { echo 'build-args<<EOF'; printf '%s\n' "$values"; echo EOF; } >> "$GITHUB_OUTPUT"
+      - name: Reclaim unused toolchains on the standard runner (runtime)
+        if: ${{ matrix.image == 'runtime' }}
+        env:
+          OPENCLAW_CI_HEADROOM_LANE: container-runtime-build
+        run: node scripts/ci/repository-platform-headroom.mjs
+      - name: Report runner resources
+        run: |
+          node -e 'const os=require("node:os"); console.log({cpus: os.availableParallelism(), memoryBytes: os.totalmem()})'
+          df -h /
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+        with:
+          buildkitd-config-inline: |
+            [worker.oci]
+              max-parallelism = 2
+      - name: Build OCI image
+        id: build
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        env:
+          DOCKER_BUILD_RECORD_UPLOAD: "false"
+        with:
+          context: .
+          file: ${{ matrix.file }}
+          target: ${{ matrix.target }}
+          platforms: linux/amd64
+          build-args: |
+            ${{ steps.openclaw-source.outputs.build-args }}
+            NODE_BASE_IMAGE=${{ env.NODE_BASE_IMAGE }}
+            OCC_BUILD_REVISION=${{ env.SOURCE_SHA }}
+            SOURCE_DATE_EPOCH=${{ env.SOURCE_DATE_EPOCH }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ env.SOURCE_REPO }}
+            org.opencontainers.image.revision=${{ env.SOURCE_SHA }}
+          outputs: type=oci,dest=${{ runner.temp }}/oci,tar=false,rewrite-timestamp=true
+          cache-from: type=gha,scope=kit-${{ matrix.image }}
+          cache-to: type=gha,mode=max,scope=kit-${{ matrix.image }}
+          provenance: false
+          push: false
+      - name: Install smoke test prerequisites
+        run: |
+          sudo apt-get -o Acquire::Retries=3 update
+          sudo apt-get -o Acquire::Retries=3 install --no-install-recommends -y skopeo
+          corepack pnpm install --frozen-lockfile --ignore-scripts
+      - name: Smoke the exact export (upstream's test)
+        env:
+          IMAGE: ${{ matrix.image }}
+          PLATFORM: linux/amd64
+          IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
+          CI_ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          if [[ "$IMAGE" == runtime ]]; then
+            bash scripts/ci/setup-tools.sh k3d
+            export PATH="$RUNNER_TEMP/bin:$PATH"
+          fi
+          node scripts/ci/container-release.mjs smoke "$RUNNER_TEMP/oci"
+      - name: Clean up runtime smoke resources
+        if: always() && matrix.image == 'runtime'
+        run: node scripts/ci/cleanup.mjs --state "$RUNNER_TEMP/runtime-smoke-amd64.json" || true
+      - name: Publish to GHCR with the digest preserved
+        env:
+          GHCR_USER: ${{ github.actor }}
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          IMAGE: ${{ matrix.image }}
+        run: |
+          owner="$(printf '%s' "$GITHUB_REPOSITORY_OWNER" | tr '[:upper:]' '[:lower:]')"
+          dest="ghcr.io/$owner/oce-$IMAGE:sha-${SOURCE_SHA:0:9}"
+          printf '%s' "$GHCR_TOKEN" | skopeo login ghcr.io -u "$GHCR_USER" --password-stdin
+          skopeo copy --preserve-digests "oci:$RUNNER_TEMP/oci" "docker://$dest"
+          digest="$(skopeo inspect --raw "docker://$dest" | sha256sum | cut -d' ' -f1)"
+          echo "- $IMAGE: \`ghcr.io/$owner/oce-$IMAGE@sha256:$digest\` (tag sha-${SOURCE_SHA:0:9})" >> "$GITHUB_STEP_SUMMARY"

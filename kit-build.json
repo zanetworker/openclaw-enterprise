@@ -1,0 +1,5 @@
+{
+ "repo": "openclaw/openclaw-enterprise",
+ "ref": "main",
+ "images": ["controller", "runtime"]
+}
