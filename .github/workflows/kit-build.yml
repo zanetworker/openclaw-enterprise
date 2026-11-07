@@ -91,6 +91,15 @@ jobs:
           buildkitd-config-inline: |
             [worker.oci]
               max-parallelism = 2
+      - name: Log in to GHCR for the layer cache
+        # The cache lives next to the images (ghcr.io/<owner>/oce-<image>:buildcache): the GitHub Actions cache
+        # is capped at 10 GB per repository and evicted most layers between builds (4 of ~100 runtime steps reused).
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          owner="$(printf '%s' "$GITHUB_REPOSITORY_OWNER" | tr '[:upper:]' '[:lower:]')"
+          printf 'CACHE_REF=ghcr.io/%s/oce-%s:buildcache\n' "$owner" "${{ matrix.image }}" >> "$GITHUB_ENV"
+          printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
       - name: Build OCI image
         id: build
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
@@ -110,8 +119,8 @@ jobs:
             org.opencontainers.image.source=https://github.com/${{ env.SOURCE_REPO }}
             org.opencontainers.image.revision=${{ env.SOURCE_SHA }}
           outputs: type=oci,dest=${{ runner.temp }}/oci,tar=false,rewrite-timestamp=true
-          cache-from: type=gha,scope=kit-${{ matrix.image }}
-          cache-to: type=gha,mode=max,scope=kit-${{ matrix.image }}
+          cache-from: type=registry,ref=${{ env.CACHE_REF }}
+          cache-to: type=registry,ref=${{ env.CACHE_REF }},mode=max,image-manifest=true,oci-mediatypes=true
           provenance: false
           push: false
       - name: Install smoke test prerequisites
