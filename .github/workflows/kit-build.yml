@@ -38,7 +38,7 @@ jobs:
     needs: resolve
     name: Build ${{ matrix.image }} (amd64)
     runs-on: ubuntu-24.04
-    timeout-minutes: 90
+    timeout-minutes: 240  # the runtime compiles Node from source (over an hour cold, Nov 11)
     strategy:
       fail-fast: false
       matrix:
