@@ -1,6 +1,6 @@
 {
  "repo": "openclaw/openclaw-enterprise",
- "ref": "3ddc9e61d9d843aba6d6cc6984a21360e59d4bd4",
+ "ref": "368cbacd2b297ea02cbf6366c1c79344159def09",
  "images": [
   "controller",
   "runtime"
