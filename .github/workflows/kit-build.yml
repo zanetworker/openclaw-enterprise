@@ -75,13 +75,14 @@ jobs:
         if: ${{ matrix.image == 'runtime' }}
         id: openclaw-source
         run: |
-          values="$(node scripts/lib/openclaw-source.mjs build-args)"
+          s=scripts/lib/openclaw-source.ts; test -f "$s" || s=${s%.ts}.mjs  # upstream renamed .mjs to .ts (#6024)
+          values="$(node "$s" build-args)"
           { echo 'build-args<<EOF'; printf '%s\n' "$values"; echo EOF; } >> "$GITHUB_OUTPUT"
       - name: Reclaim unused toolchains on the standard runner (runtime)
         if: ${{ matrix.image == 'runtime' }}
         env:
           OPENCLAW_CI_HEADROOM_LANE: container-runtime-build
-        run: node scripts/ci/repository-platform-headroom.mjs
+        run: s=scripts/ci/repository-platform-headroom.ts; test -f "$s" || s=${s%.ts}.mjs; node "$s"
       - name: Report runner resources
         run: |
           node -e 'const os=require("node:os"); console.log({cpus: os.availableParallelism(), memoryBytes: os.totalmem()})'
@@ -152,10 +153,11 @@ jobs:
             bash scripts/ci/setup-tools.sh k3d
             export PATH="$RUNNER_TEMP/bin:$PATH"
           fi
-          node scripts/ci/container-release.mjs smoke "$RUNNER_TEMP/oci"
+          s=scripts/ci/container-release.ts; test -f "$s" || s=${s%.ts}.mjs
+          node "$s" smoke "$RUNNER_TEMP/oci"
       - name: Clean up runtime smoke resources
         if: always() && matrix.image == 'runtime'
-        run: node scripts/ci/cleanup.mjs --state "$RUNNER_TEMP/runtime-smoke-amd64.json" || true
+        run: s=scripts/ci/cleanup.ts; test -f "$s" || s=${s%.ts}.mjs; node "$s" --state "$RUNNER_TEMP/runtime-smoke-amd64.json" || true
       - name: Publish to GHCR with the digest preserved
         env:
           GHCR_USER: ${{ github.actor }}
